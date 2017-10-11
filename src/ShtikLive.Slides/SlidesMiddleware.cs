@@ -8,7 +8,6 @@ using Microsoft.Extensions.Options;
 using Microsoft.WindowsAzure.Storage;
 using Microsoft.WindowsAzure.Storage.Blob;
 using Polly;
-using Polly.CircuitBreaker;
 using ShtikLive.Slides.Options;
 
 namespace ShtikLive.Slides
@@ -43,9 +42,9 @@ namespace ShtikLive.Slides
                 {
                     return Get(path[0], path[1], path[2], context);
                 }
-                if (context.Request.Method.Equals("POST", StringComparison.OrdinalIgnoreCase))
+                if (context.Request.Method.Equals("PUT", StringComparison.OrdinalIgnoreCase))
                 {
-                    return Post(path[0], path[1], path[2], context);
+                    return Put(path[0], path[1], path[2], context);
                 }
                 if (context.Request.Method.Equals("HEAD", StringComparison.OrdinalIgnoreCase))
                 {
@@ -57,22 +56,17 @@ namespace ShtikLive.Slides
             return Task.CompletedTask;
         }
 
-        private Task Post(string presenter, string show, string index, HttpContext context)
+        private Task Put(string presenter, string show, string index, HttpContext context)
         {
             return _postPolicy.ExecuteAsync(async () =>
             {
-                byte[] content;
-                using (var stream = new MemoryStream(32768))
-                {
-                    await context.Request.Body.CopyToAsync(stream);
-                    content = stream.ToArray();
-                }
                 var containerRef = _client.GetContainerReference(presenter);
                 await containerRef.CreateIfNotExistsAsync(BlobContainerPublicAccessType.Off, null, null);
                 var directory = containerRef.GetDirectoryReference(show);
                 var blob = directory.GetBlockBlobReference($"{index}.jpg");
                 blob.Properties.ContentType = context.Request.ContentType;
-                await blob.UploadFromByteArrayAsync(content, 0, content.Length);
+                await blob.UploadFromStreamAsync(context.Request.Body);
+                await blob.SetPropertiesAsync();
                 context.Response.StatusCode = 201;
             });
         }
@@ -122,27 +116,6 @@ namespace ShtikLive.Slides
                 }
                 context.Response.StatusCode = 404;
             });
-        }
-    }
-
-    public static class ResiliencePolicy
-    {
-        public static Policy Create(ILogger logger)
-        {
-            var retry = Policy.Handle<Exception>(e => !(e is BrokenCircuitException))
-                .WaitAndRetryForeverAsync(n => TimeSpan.FromMilliseconds(Math.Min((n + 1) * 100, 500)),
-                    (result, _) =>
-                    {
-                        if (result != null)
-                            logger.LogWarning(result, result.Message);
-                    });
-
-            var breaker = Policy.Handle<Exception>()
-                .CircuitBreakerAsync(5, TimeSpan.FromMinutes(1),
-                    (result, _) => logger.LogWarning("Circuit breaker tripped."),
-                    () => logger.LogWarning("Circuit breaker reset."));
-
-            return Policy.WrapAsync(retry, breaker);
         }
     }
 }
